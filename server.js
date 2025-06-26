@@ -1,10 +1,11 @@
-// server.js - Express.js server for Render.com
+// server.js - Express.js server with OTP email authentication
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { createClient } = require('@supabase/supabase-js');
+const { Resend } = require('resend');
 require('dotenv').config();
 
 const app = express();
@@ -15,8 +16,15 @@ const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
+// Resend setup
+const resend = new Resend(process.env.RESEND_API_KEY);
+
 // JWT secret - add this to your environment variables
 const JWT_SECRET = process.env.JWT_SECRET || 'your-fallback-secret-key';
+
+// OTP configuration
+const OTP_EXPIRY_MINUTES = 10; // OTP expires in 10 minutes
+const OTP_LENGTH = 6; // 6-digit OTP
 
 // Middleware - CORS configuration to accept calls from anywhere
 app.use(cors({
@@ -51,6 +59,49 @@ const authenticateToken = (req, res, next) => {
     req.user = user;
     next();
   });
+};
+
+// Utility function to generate OTP
+const generateOTP = () => {
+  return Math.floor(100000 + Math.random() * 900000).toString(); // 6-digit OTP
+};
+
+// Utility function to send OTP email
+const sendOTPEmail = async (email, otp, type = 'signin') => {
+  try {
+    const subject = type === 'signin' ? 'Your Sign-In Code' : 'Your Verification Code';
+    const html = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <h2 style="color: #333; text-align: center;">Your Verification Code</h2>
+        <div style="background-color: #f8f9fa; border-radius: 8px; padding: 30px; text-align: center; margin: 20px 0;">
+          <h1 style="color: #007bff; font-size: 36px; margin: 0; letter-spacing: 5px;">${otp}</h1>
+        </div>
+        <p style="color: #666; text-align: center; margin: 20px 0;">
+          Enter this code to ${type === 'signin' ? 'sign in to' : 'verify'} your account.
+        </p>
+        <p style="color: #999; font-size: 14px; text-align: center;">
+          This code expires in ${OTP_EXPIRY_MINUTES} minutes. If you didn't request this code, please ignore this email.
+        </p>
+      </div>
+    `;
+
+    const { data, error } = await resend.emails.send({
+      from: process.env.FROM_EMAIL || 'noreply@yourdomain.com', // Update with your verified domain
+      to: [email],
+      subject: subject,
+      html: html,
+    });
+
+    if (error) {
+      console.error('Resend error:', error);
+      return { success: false, error };
+    }
+
+    return { success: true, data };
+  } catch (error) {
+    console.error('Email sending error:', error);
+    return { success: false, error };
+  }
 };
 
 // Health check endpoint
@@ -173,7 +224,7 @@ app.post('/api/signup', async (req, res) => {
   }
 });
 
-// Sign in endpoint
+// Sign in endpoint (traditional password)
 app.post('/api/signin', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -234,6 +285,234 @@ app.post('/api/signin', async (req, res) => {
 
   } catch (error) {
     console.error('Signin error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error'
+    });
+  }
+});
+
+// NEW: Send OTP for email sign-in
+app.post('/api/send-otp', async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email is required'
+      });
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid email format'
+      });
+    }
+
+    // Check if user exists
+    const { data: user, error } = await supabase
+      .from('profiles')
+      .select('id, email, full_name')
+      .eq('email', email.toLowerCase())
+      .single();
+
+    if (error || !user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Email not registered. Please sign up first.'
+      });
+    }
+
+    // Generate OTP
+    const otp = generateOTP();
+    const expiresAt = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000);
+
+    // Store OTP in database (you'll need to create an otp_codes table)
+    const { error: otpError } = await supabase
+      .from('otp_codes')
+      .upsert([{
+        email: email.toLowerCase(),
+        otp_code: otp,
+        expires_at: expiresAt.toISOString(),
+        created_at: new Date().toISOString(),
+        used: false
+      }], { onConflict: 'email' });
+
+    if (otpError) {
+      console.error('OTP storage error:', otpError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to generate OTP'
+      });
+    }
+
+    // Send OTP via email
+    const emailResult = await sendOTPEmail(email, otp, 'signin');
+    
+    if (!emailResult.success) {
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to send OTP email',
+        error: emailResult.error
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'OTP sent successfully to your email',
+      expiresIn: OTP_EXPIRY_MINUTES
+    });
+
+  } catch (error) {
+    console.error('Send OTP error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error'
+    });
+  }
+});
+
+// NEW: Verify OTP and sign in
+app.post('/api/verify-otp', async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+
+    if (!email || !otp) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email and OTP are required'
+      });
+    }
+
+    // Get stored OTP
+    const { data: otpRecord, error: otpError } = await supabase
+      .from('otp_codes')
+      .select('*')
+      .eq('email', email.toLowerCase())
+      .eq('otp_code', otp)
+      .eq('used', false)
+      .single();
+
+    if (otpError || !otpRecord) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid OTP code'
+      });
+    }
+
+    // Check if OTP is expired
+    const now = new Date();
+    const expiresAt = new Date(otpRecord.expires_at);
+    
+    if (now > expiresAt) {
+      // Mark OTP as used to prevent reuse
+      await supabase
+        .from('otp_codes')
+        .update({ used: true })
+        .eq('email', email.toLowerCase());
+
+      return res.status(401).json({
+        success: false,
+        message: 'OTP code has expired'
+      });
+    }
+
+    // Mark OTP as used
+    await supabase
+      .from('otp_codes')
+      .update({ used: true })
+      .eq('email', email.toLowerCase());
+
+    // Get user details
+    const { data: user, error: userError } = await supabase
+      .from('profiles')
+      .select('id, email, full_name')
+      .eq('email', email.toLowerCase())
+      .single();
+
+    if (userError || !user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Generate JWT token
+    const token = jwt.sign(
+      { userId: user.id, email: user.email },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    // Update last login
+    await supabase
+      .from('profiles')
+      .update({ last_login: new Date().toISOString() })
+      .eq('id', user.id);
+
+    res.status(200).json({
+      success: true,
+      message: 'OTP verification successful',
+      user: {
+        id: user.id,
+        email: user.email,
+        full_name: user.full_name
+      },
+      token
+    });
+
+  } catch (error) {
+    console.error('OTP verification error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error'
+    });
+  }
+});
+
+// NEW: Resend OTP
+app.post('/api/resend-otp', async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email is required'
+      });
+    }
+
+    // Check rate limiting - prevent too frequent requests
+    const { data: lastOtp } = await supabase
+      .from('otp_codes')
+      .select('created_at')
+      .eq('email', email.toLowerCase())
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (lastOtp) {
+      const timeSinceLastOtp = Date.now() - new Date(lastOtp.created_at).getTime();
+      const rateLimitMs = 60 * 1000; // 1 minute rate limit
+
+      if (timeSinceLastOtp < rateLimitMs) {
+        return res.status(429).json({
+          success: false,
+          message: 'Please wait before requesting another OTP',
+          retryAfter: Math.ceil((rateLimitMs - timeSinceLastOtp) / 1000)
+        });
+      }
+    }
+
+    // Use the same logic as send-otp
+    return app._router.handle({ ...req, url: '/api/send-otp', method: 'POST' }, res);
+
+  } catch (error) {
+    console.error('Resend OTP error:', error);
     res.status(500).json({
       success: false,
       message: 'Internal server error'
@@ -412,7 +691,7 @@ app.post('/api/migrate-user', async (req, res) => {
   }
 });
 
-// Email check endpoint - NOW THIS WILL WORK!
+// Email check endpoint
 app.post('/api/check-email', async (req, res) => {
   try {
     const { email } = req.body;
@@ -433,7 +712,7 @@ app.post('/api/check-email', async (req, res) => {
       });
     }
 
-    // Check if email exists in your profiles table (now with email column!)
+    // Check if email exists in your profiles table
     const { data, error } = await supabase
       .from('profiles') 
       .select('email')
@@ -482,7 +761,7 @@ app.post('/api/add-test-email', async (req, res) => {
       .from('profiles')
       .insert([
         { 
-          id: crypto.randomUUID(), // Generate UUID
+          id: crypto.randomUUID(),
           email: email.toLowerCase(),
           full_name: full_name || 'Test User'
         }
@@ -536,6 +815,37 @@ app.get('/api/list-emails', async (req, res) => {
   } catch (error) {
     res.status(500).json({
       success: false,
+      error: error.message
+    });
+  }
+});
+
+// NEW: Clean up expired OTPs (maintenance endpoint)
+app.post('/api/cleanup-otps', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('otp_codes')
+      .delete()
+      .lt('expires_at', new Date().toISOString());
+
+    if (error) {
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to cleanup expired OTPs',
+        error: error.message
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Expired OTPs cleaned up successfully',
+      deletedCount: data?.length || 0
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
       error: error.message
     });
   }
