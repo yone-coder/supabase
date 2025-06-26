@@ -57,7 +57,7 @@ app.post('/api/check-email', async (req, res) => {
 
     // Check if email exists in your users table
     const { data, error } = await supabase
-      .from('users') // Replace 'users' with your actual table name
+      .from('profiles') // Replace 'users' with your actual table name
       .select('email')
       .eq('email', email.toLowerCase())
       .single();
