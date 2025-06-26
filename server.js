@@ -132,10 +132,14 @@ app.post('/api/add-test-email', async (req, res) => {
       });
     }
 
+    // Generate UUID for the id field
+    const { v4: uuidv4 } = require('crypto');
+    
     const { data, error } = await supabase
       .from('profiles')
       .insert([
         { 
+          id: uuidv4(), // Generate UUID
           email: email.toLowerCase(),
           full_name: full_name || 'Test User'
         }
