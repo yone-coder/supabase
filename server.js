@@ -2,6 +2,8 @@
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
 const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 
@@ -12,6 +14,9 @@ const PORT = process.env.PORT || 3001;
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
+
+// JWT secret - add this to your environment variables
+const JWT_SECRET = process.env.JWT_SECRET || 'your-fallback-secret-key';
 
 // Middleware - CORS configuration to accept calls from anywhere
 app.use(cors({
@@ -29,6 +34,24 @@ app.options('*', (req, res) => {
   res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
   res.sendStatus(200);
 });
+
+// Middleware to verify JWT token
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+
+  if (!token) {
+    return res.status(401).json({ success: false, message: 'Access token required' });
+  }
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) {
+      return res.status(403).json({ success: false, message: 'Invalid or expired token' });
+    }
+    req.user = user;
+    next();
+  });
+};
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -63,6 +86,187 @@ app.get('/api/test-db', async (req, res) => {
       success: false,
       message: 'Database test failed',
       error: error.message
+    });
+  }
+});
+
+// Sign up endpoint
+app.post('/api/signup', async (req, res) => {
+  try {
+    const { email, password, full_name } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email and password are required'
+      });
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid email format'
+      });
+    }
+
+    // Check if email already exists
+    const { data: existingUser } = await supabase
+      .from('profiles')
+      .select('email')
+      .eq('email', email.toLowerCase())
+      .single();
+
+    if (existingUser) {
+      return res.status(409).json({
+        success: false,
+        message: 'Email already registered'
+      });
+    }
+
+    // Hash password
+    const saltRounds = 10;
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
+
+    // Create user
+    const userId = crypto.randomUUID();
+    const { data, error } = await supabase
+      .from('profiles')
+      .insert([{
+        id: userId,
+        email: email.toLowerCase(),
+        password_hash: hashedPassword,
+        full_name: full_name || null,
+        created_at: new Date().toISOString()
+      }])
+      .select('id, email, full_name, created_at');
+
+    if (error) {
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to create user',
+        error: error.message
+      });
+    }
+
+    // Generate JWT token
+    const token = jwt.sign(
+      { userId: userId, email: email.toLowerCase() },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'User created successfully',
+      user: data[0],
+      token
+    });
+
+  } catch (error) {
+    console.error('Signup error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error'
+    });
+  }
+});
+
+// Sign in endpoint
+app.post('/api/signin', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email and password are required'
+      });
+    }
+
+    // Find user by email
+    const { data: user, error } = await supabase
+      .from('profiles')
+      .select('id, email, password_hash, full_name')
+      .eq('email', email.toLowerCase())
+      .single();
+
+    if (error || !user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid email or password'
+      });
+    }
+
+    // Verify password
+    const validPassword = await bcrypt.compare(password, user.password_hash);
+    if (!validPassword) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid email or password'
+      });
+    }
+
+    // Generate JWT token
+    const token = jwt.sign(
+      { userId: user.id, email: user.email },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    // Update last login
+    await supabase
+      .from('profiles')
+      .update({ last_login: new Date().toISOString() })
+      .eq('id', user.id);
+
+    res.status(200).json({
+      success: true,
+      message: 'Sign in successful',
+      user: {
+        id: user.id,
+        email: user.email,
+        full_name: user.full_name
+      },
+      token
+    });
+
+  } catch (error) {
+    console.error('Signin error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error'
+    });
+  }
+});
+
+// Get current user profile (protected route)
+app.get('/api/profile', authenticateToken, async (req, res) => {
+  try {
+    const { data: user, error } = await supabase
+      .from('profiles')
+      .select('id, email, full_name, created_at, last_login')
+      .eq('id', req.user.userId)
+      .single();
+
+    if (error || !user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      user
+    });
+
+  } catch (error) {
+    console.error('Profile error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error'
     });
   }
 });
