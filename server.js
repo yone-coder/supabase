@@ -183,7 +183,7 @@ app.post('/api/check-email', async (req, res) => {
         details: testError.details,
         hint: testError.hint
       });
-      
+
       return res.status(500).json({ 
         success: false, 
         message: 'Database table error',
