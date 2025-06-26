@@ -271,6 +271,147 @@ app.get('/api/profile', authenticateToken, async (req, res) => {
   }
 });
 
+// Add password to existing user (for migration/setup)
+app.post('/api/set-password', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email and password are required'
+      });
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid email format'
+      });
+    }
+
+    // Hash the new password
+    const saltRounds = 10;
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
+
+    // Update the user's password
+    const { data, error } = await supabase
+      .from('profiles')
+      .update({ 
+        password_hash: hashedPassword,
+        updated_at: new Date().toISOString()
+      })
+      .eq('email', email.toLowerCase())
+      .select('id, email, full_name');
+
+    if (error) {
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to update password',
+        error: error.message
+      });
+    }
+
+    if (!data || data.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Password set successfully',
+      user: data[0]
+    });
+
+  } catch (error) {
+    console.error('Set password error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error'
+    });
+  }
+});
+
+// Temporary endpoint to migrate users without passwords
+app.post('/api/migrate-user', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email and password are required'
+      });
+    }
+    
+    // Check if user exists and has no password
+    const { data: user, error: fetchError } = await supabase
+      .from('profiles')
+      .select('id, email, password_hash, full_name')
+      .eq('email', email.toLowerCase())
+      .single();
+      
+    if (fetchError || !user) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'User not found' 
+      });
+    }
+    
+    if (user.password_hash) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'User already has password. Use sign in instead.' 
+      });
+    }
+    
+    // Set password
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const { data, error } = await supabase
+      .from('profiles')
+      .update({ 
+        password_hash: hashedPassword,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', user.id)
+      .select('id, email, full_name');
+      
+    if (error) {
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Failed to set password',
+        error: error.message 
+      });
+    }
+    
+    // Generate JWT token for immediate login
+    const token = jwt.sign(
+      { userId: user.id, email: user.email },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+    
+    res.status(200).json({ 
+      success: true, 
+      message: 'Password added successfully. User can now sign in.',
+      user: data[0],
+      token
+    });
+    
+  } catch (error) {
+    console.error('Migration error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Internal server error',
+      error: error.message 
+    });
+  }
+});
+
 // Email check endpoint - NOW THIS WILL WORK!
 app.post('/api/check-email', async (req, res) => {
   try {
