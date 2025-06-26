@@ -54,7 +54,7 @@ app.get('/api/test-db', async (req, res) => {
 
     // Test basic connection
     const { data, error } = await supabase
-      .from('users')
+      .from('auth.users')
       .select('*')
       .limit(1);
 
