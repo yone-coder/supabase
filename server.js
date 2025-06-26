@@ -1,6 +1,7 @@
 // server.js - Express.js server for Render.com
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 
@@ -132,14 +133,11 @@ app.post('/api/add-test-email', async (req, res) => {
       });
     }
 
-    // Generate UUID for the id field
-    const { v4: uuidv4 } = require('crypto');
-    
     const { data, error } = await supabase
       .from('profiles')
       .insert([
         { 
-          id: uuidv4(), // Generate UUID
+          id: crypto.randomUUID(), // Generate UUID
           email: email.toLowerCase(),
           full_name: full_name || 'Test User'
         }
