@@ -136,7 +136,7 @@ app.post('/api/signup', async (req, res) => {
       .insert([{
         id: userId,
         email: email.toLowerCase(),
-        password_hash: hashedPassword,
+        password: hashedPassword,
         full_name: full_name || null,
         created_at: new Date().toISOString()
       }])
@@ -188,7 +188,7 @@ app.post('/api/signin', async (req, res) => {
     // Find user by email
     const { data: user, error } = await supabase
       .from('profiles')
-      .select('id, email, password_hash, full_name')
+      .select('id, email, password, full_name')
       .eq('email', email.toLowerCase())
       .single();
 
@@ -200,7 +200,7 @@ app.post('/api/signin', async (req, res) => {
     }
 
     // Verify password
-    const validPassword = await bcrypt.compare(password, user.password_hash);
+    const validPassword = await bcrypt.compare(password, user.password);
     if (!validPassword) {
       return res.status(401).json({
         success: false,
