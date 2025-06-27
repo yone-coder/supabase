@@ -1,12 +1,13 @@
-
 const supabase = require('../config/database');
 const { OTP_EXPIRY_MINUTES, RATE_LIMIT_MS } = require('../config/constants');
 
 class OTPService {
+  // Generate a 6-digit numeric OTP
   static generateOTP() {
     return Math.floor(100000 + Math.random() * 900000).toString();
   }
 
+  // Store or update an OTP for a given email and purpose
   static async storeOTP(email, otp, purpose = 'signin') {
     const expiresAt = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000);
 
@@ -19,7 +20,9 @@ class OTPService {
         expires_at: expiresAt.toISOString(),
         created_at: new Date().toISOString(),
         used: false
-      }], { onConflict: 'email' });
+      }], {
+        onConflict: ['email', 'purpose'] // ✅ Make sure UNIQUE(email, purpose) exists in the DB
+      });
 
     if (error) {
       throw error;
@@ -28,6 +31,7 @@ class OTPService {
     return { expiresAt, expiresIn: OTP_EXPIRY_MINUTES };
   }
 
+  // Verify if the OTP is valid, not expired, and not used
   static async verifyOTP(email, otp, purpose = 'signin') {
     const { data: otpRecord, error } = await supabase
       .from('otp_codes')
@@ -44,7 +48,7 @@ class OTPService {
 
     const now = new Date();
     const expiresAt = new Date(otpRecord.expires_at);
-    
+
     if (now > expiresAt) {
       await this.markOTPAsUsed(otpRecord.id);
       return { valid: false, message: 'OTP code has expired' };
@@ -54,6 +58,7 @@ class OTPService {
     return { valid: true, otpRecord };
   }
 
+  // Mark the OTP as used
   static async markOTPAsUsed(otpId) {
     await supabase
       .from('otp_codes')
@@ -61,6 +66,7 @@ class OTPService {
       .eq('id', otpId);
   }
 
+  // Prevent OTP spamming — only allow one OTP per X seconds
   static async checkRateLimit(email, purpose = 'signin') {
     const { data: lastOtp } = await supabase
       .from('otp_codes')
@@ -73,7 +79,7 @@ class OTPService {
 
     if (lastOtp) {
       const timeSinceLastOtp = Date.now() - new Date(lastOtp.created_at).getTime();
-      
+
       if (timeSinceLastOtp < RATE_LIMIT_MS) {
         return {
           limited: true,
@@ -85,6 +91,7 @@ class OTPService {
     return { limited: false };
   }
 
+  // Clean up old OTPs after expiry
   static async cleanupExpiredOTPs() {
     const { data, error } = await supabase
       .from('otp_codes')
