@@ -691,6 +691,142 @@ app.post('/api/migrate-user', async (req, res) => {
   }
 });
 
+// Add this temporary endpoint to your server.js for debugging
+app.post('/api/debug-otp', async (req, res) => {
+  try {
+    console.log('=== Debug OTP Insert Test ===');
+    
+    // Test 1: Simple select to verify table exists
+    console.log('Test 1: Checking if otp_codes table exists...');
+    const { data: tableTest, error: tableError } = await supabase
+      .from('otp_codes')
+      .select('*')
+      .limit(1);
+    
+    if (tableError) {
+      console.error('Table test error:', tableError);
+      return res.status(500).json({
+        success: false,
+        step: 'table_check',
+        error: tableError
+      });
+    }
+    console.log('✓ Table exists and is accessible');
+
+    // Test 2: Simple insert
+    console.log('Test 2: Attempting simple insert...');
+    const testOtp = {
+      email: 'debug@test.com',
+      otp_code: '123456',
+      expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      created_at: new Date().toISOString(),
+      used: false
+    };
+    
+    console.log('Test data:', testOtp);
+    
+    const { data: insertData, error: insertError } = await supabase
+      .from('otp_codes')
+      .insert([testOtp])
+      .select();
+    
+    if (insertError) {
+      console.error('Insert test error:', insertError);
+      return res.status(500).json({
+        success: false,
+        step: 'insert_test',
+        error: insertError,
+        testData: testOtp
+      });
+    }
+    console.log('✓ Insert successful:', insertData);
+
+    // Test 3: Upsert (like the real endpoint does)
+    console.log('Test 3: Testing upsert...');
+    const upsertOtp = {
+      email: 'debug@test.com', // Same email to test upsert
+      otp_code: '654321',
+      expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      created_at: new Date().toISOString(),
+      used: false
+    };
+    
+    const { data: upsertData, error: upsertError } = await supabase
+      .from('otp_codes')
+      .upsert([upsertOtp], { onConflict: 'email' })
+      .select();
+    
+    if (upsertError) {
+      console.error('Upsert test error:', upsertError);
+      return res.status(500).json({
+        success: false,
+        step: 'upsert_test',
+        error: upsertError,
+        testData: upsertOtp
+      });
+    }
+    console.log('✓ Upsert successful:', upsertData);
+
+    // Cleanup
+    await supabase
+      .from('otp_codes')
+      .delete()
+      .eq('email', 'debug@test.com');
+
+    res.json({
+      success: true,
+      message: 'All OTP database tests passed',
+      results: {
+        tableExists: true,
+        insertWorked: true,
+        upsertWorked: true,
+        insertData,
+        upsertData
+      }
+    });
+
+  } catch (error) {
+    console.error('Debug endpoint error:', error);
+    res.status(500).json({
+      success: false,
+      step: 'catch_block',
+      error: error.message,
+      stack: error.stack
+    });
+  }
+});
+
+// Also add this endpoint to check your table structure
+app.get('/api/check-otp-table', async (req, res) => {
+  try {
+    // Get some info about the table
+    const { data, error } = await supabase
+      .from('otp_codes')
+      .select('*')
+      .limit(5);
+
+    if (error) {
+      return res.status(500).json({
+        success: false,
+        error: error
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'OTP table info',
+      sampleData: data,
+      rowCount: data.length
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 // Email check endpoint
 app.post('/api/check-email', async (req, res) => {
   try {
