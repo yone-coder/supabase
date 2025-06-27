@@ -691,6 +691,285 @@ app.post('/api/migrate-user', async (req, res) => {
   }
 });
 
+
+
+
+// Add these endpoints to your existing server.js file
+
+// NEW: Request password reset (sends OTP via email)
+app.post('/api/request-password-reset', async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email is required'
+      });
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid email format'
+      });
+    }
+
+    // Check if user exists
+    const { data: user, error } = await supabase
+      .from('profiles')
+      .select('id, email, full_name')
+      .eq('email', email.toLowerCase())
+      .single();
+
+    if (error || !user) {
+      // For security, don't reveal if email exists or not
+      return res.status(200).json({
+        success: true,
+        message: 'If the email is registered, you will receive a password reset code shortly.',
+        expiresIn: OTP_EXPIRY_MINUTES
+      });
+    }
+
+    // Check rate limiting - prevent too frequent requests
+    const { data: lastOtp } = await supabase
+      .from('otp_codes')
+      .select('created_at, purpose')
+      .eq('email', email.toLowerCase())
+      .eq('purpose', 'password_reset')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (lastOtp) {
+      const timeSinceLastOtp = Date.now() - new Date(lastOtp.created_at).getTime();
+      const rateLimitMs = 60 * 1000; // 1 minute rate limit
+
+      if (timeSinceLastOtp < rateLimitMs) {
+        return res.status(429).json({
+          success: false,
+          message: 'Please wait before requesting another password reset code',
+          retryAfter: Math.ceil((rateLimitMs - timeSinceLastOtp) / 1000)
+        });
+      }
+    }
+
+    // Generate OTP
+    const otp = generateOTP();
+    const expiresAt = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000);
+
+    // Store OTP in database with password reset purpose
+    const { error: otpError } = await supabase
+      .from('otp_codes')
+      .insert([{
+        email: email.toLowerCase(),
+        otp_code: otp,
+        purpose: 'password_reset', // Add purpose field to distinguish from signin OTPs
+        expires_at: expiresAt.toISOString(),
+        created_at: new Date().toISOString(),
+        used: false
+      }]);
+
+    if (otpError) {
+      console.error('OTP storage error:', otpError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to generate password reset code'
+      });
+    }
+
+    // Send OTP via email with password reset context
+    const emailResult = await sendPasswordResetEmail(email, otp);
+    
+    if (!emailResult.success) {
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to send password reset email',
+        error: emailResult.error
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Password reset code sent to your email',
+      expiresIn: OTP_EXPIRY_MINUTES
+    });
+
+  } catch (error) {
+    console.error('Password reset request error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error'
+    });
+  }
+});
+
+// NEW: Reset password with OTP verification
+app.post('/api/reset-password', async (req, res) => {
+  try {
+    const { email, otp, newPassword } = req.body;
+
+    if (!email || !otp || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email, OTP, and new password are required'
+      });
+    }
+
+    // Validate password strength (add your own rules)
+    if (newPassword.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'Password must be at least 6 characters long'
+      });
+    }
+
+    // Get stored OTP for password reset
+    const { data: otpRecord, error: otpError } = await supabase
+      .from('otp_codes')
+      .select('*')
+      .eq('email', email.toLowerCase())
+      .eq('otp_code', otp)
+      .eq('purpose', 'password_reset')
+      .eq('used', false)
+      .single();
+
+    if (otpError || !otpRecord) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid password reset code'
+      });
+    }
+
+    // Check if OTP is expired
+    const now = new Date();
+    const expiresAt = new Date(otpRecord.expires_at);
+    
+    if (now > expiresAt) {
+      // Mark OTP as used to prevent reuse
+      await supabase
+        .from('otp_codes')
+        .update({ used: true })
+        .eq('id', otpRecord.id);
+
+      return res.status(401).json({
+        success: false,
+        message: 'Password reset code has expired'
+      });
+    }
+
+    // Mark OTP as used
+    await supabase
+      .from('otp_codes')
+      .update({ used: true })
+      .eq('id', otpRecord.id);
+
+    // Hash the new password
+    const saltRounds = 10;
+    const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
+
+    // Update user's password
+    const { data: updatedUser, error: updateError } = await supabase
+      .from('profiles')
+      .update({ 
+        password_hash: hashedPassword,
+        updated_at: new Date().toISOString()
+      })
+      .eq('email', email.toLowerCase())
+      .select('id, email, full_name');
+
+    if (updateError || !updatedUser || updatedUser.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found or password update failed'
+      });
+    }
+
+    // Generate JWT token for immediate login (optional)
+    const token = jwt.sign(
+      { userId: updatedUser[0].id, email: updatedUser[0].email },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    // Update last login
+    await supabase
+      .from('profiles')
+      .update({ last_login: new Date().toISOString() })
+      .eq('id', updatedUser[0].id);
+
+    res.status(200).json({
+      success: true,
+      message: 'Password reset successful',
+      user: {
+        id: updatedUser[0].id,
+        email: updatedUser[0].email,
+        full_name: updatedUser[0].full_name
+      },
+      token // Include token to automatically sign user in
+    });
+
+  } catch (error) {
+    console.error('Password reset error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error'
+    });
+  }
+});
+
+// NEW: Utility function to send password reset email
+const sendPasswordResetEmail = async (email, otp) => {
+  try {
+    const html = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <h2 style="color: #333; text-align: center;">Password Reset Request</h2>
+        <p style="color: #666; text-align: center; margin: 20px 0;">
+          We received a request to reset your password. Use the code below to set a new password:
+        </p>
+        <div style="background-color: #f8f9fa; border-radius: 8px; padding: 30px; text-align: center; margin: 20px 0;">
+          <h1 style="color: #dc3545; font-size: 36px; margin: 0; letter-spacing: 5px;">${otp}</h1>
+        </div>
+        <p style="color: #666; text-align: center; margin: 20px 0;">
+          Enter this code along with your new password to complete the reset process.
+        </p>
+        <p style="color: #999; font-size: 14px; text-align: center;">
+          This code expires in ${OTP_EXPIRY_MINUTES} minutes. If you didn't request a password reset, please ignore this email and your password will remain unchanged.
+        </p>
+        <div style="border-top: 1px solid #eee; margin-top: 30px; padding-top: 20px;">
+          <p style="color: #999; font-size: 12px; text-align: center;">
+            For security reasons, this code can only be used once. If you need a new code, please request another password reset.
+          </p>
+        </div>
+      </div>
+    `;
+
+    const { data, error } = await resend.emails.send({
+      from: process.env.FROM_EMAIL || 'noreply@yourdomain.com',
+      to: [email],
+      subject: 'Password Reset Code',
+      html: html,
+    });
+
+    if (error) {
+      console.error('Resend error:', error);
+      return { success: false, error };
+    }
+
+    return { success: true, data };
+  } catch (error) {
+    console.error('Password reset email sending error:', error);
+    return { success: false, error };
+  }
+};
+
+
+
+
+
+
 // Add this temporary endpoint to your server.js for debugging
 app.post('/api/debug-otp', async (req, res) => {
   try {
