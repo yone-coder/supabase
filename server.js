@@ -1,5 +1,7 @@
 const express = require('express');
 const cors = require('cors');
+const session = require('express-session');
+const passport = require('./config/passport'); // Import configured passport
 require('dotenv').config();
 
 // Import middleware
@@ -11,11 +13,27 @@ const authRoutes = require('./routes/auth');
 const otpRoutes = require('./routes/otp');
 const userRoutes = require('./routes/user');
 const testRoutes = require('./routes/test');
+const googleAuthRoutes = require('./routes/googleAuth');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Apply middleware
+// Session middleware (required for Passport) - must come before passport
+app.use(session({
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    secure: process.env.NODE_ENV === 'production',
+    maxAge: 24 * 60 * 60 * 1000 // 24 hours
+  }
+}));
+
+// Passport middleware
+app.use(passport.initialize());
+app.use(passport.session());
+
+// Apply other middleware
 corsMiddleware(app);
 jsonMiddleware(app);
 optionsMiddleware(app);
@@ -30,6 +48,7 @@ app.use('/api', authRoutes);
 app.use('/api', otpRoutes);
 app.use('/api', userRoutes);
 app.use('/api', testRoutes);
+app.use('/api/auth', googleAuthRoutes); // Google OAuth routes
 
 // Apply error handlers
 app.use(errorHandler);
