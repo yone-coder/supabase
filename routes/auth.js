@@ -3,7 +3,6 @@ const UserService = require('../services/userService');
 const JWTUtils = require('../utils/jwt');
 const ValidationUtils = require('../utils/validation');
 const { authenticateToken } = require('../middleware/auth'); // Add this import
-const supabase = require('../config/supabase'); // Add this import
 
 const router = express.Router();
 
@@ -129,13 +128,9 @@ router.post('/unlink-google', authenticateToken, async (req, res) => {
     const userId = req.user.userId;
 
     // Check if user has a password (can't unlink if it's their only auth method)
-    const { data: user } = await supabase
-      .from('profiles')
-      .select('password_hash')
-      .eq('id', userId)
-      .single();
-
-    if (!user.password_hash) {
+    const user = await UserService.findById(userId);
+    
+    if (!user || !user.password_hash) {
       return res.status(400).json({
         success: false,
         message: 'Cannot unlink Google account. Please set a password first.'
@@ -143,15 +138,7 @@ router.post('/unlink-google', authenticateToken, async (req, res) => {
     }
 
     // Unlink Google account
-    await supabase
-      .from('profiles')
-      .update({
-        google_id: null,
-        auth_provider: 'email',
-        avatar_url: null,
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', userId);
+    await UserService.unlinkGoogleAccount(userId);
 
     res.json({
       success: true,
@@ -178,11 +165,7 @@ router.post('/check-google', async (req, res) => {
       });
     }
 
-    const { data: user } = await supabase
-      .from('profiles')
-      .select('google_id, auth_provider')
-      .eq('email', email)
-      .single();
+    const user = await UserService.findByEmailWithGoogleInfo(email);
 
     res.json({
       success: true,
