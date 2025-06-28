@@ -2,6 +2,8 @@ const express = require('express');
 const UserService = require('../services/userService');
 const JWTUtils = require('../utils/jwt');
 const ValidationUtils = require('../utils/validation');
+const { authenticateToken } = require('../middleware/auth'); // Add this import
+const supabase = require('../config/supabase'); // Add this import
 
 const router = express.Router();
 
@@ -117,6 +119,81 @@ router.post('/signin', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Internal server error'
+    });
+  }
+});
+
+// Unlink Google account endpoint
+router.post('/unlink-google', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+
+    // Check if user has a password (can't unlink if it's their only auth method)
+    const { data: user } = await supabase
+      .from('profiles')
+      .select('password_hash')
+      .eq('id', userId)
+      .single();
+
+    if (!user.password_hash) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot unlink Google account. Please set a password first.'
+      });
+    }
+
+    // Unlink Google account
+    await supabase
+      .from('profiles')
+      .update({
+        google_id: null,
+        auth_provider: 'email',
+        avatar_url: null,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', userId);
+
+    res.json({
+      success: true,
+      message: 'Google account unlinked successfully'
+    });
+  } catch (error) {
+    console.error('Error unlinking Google account:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to unlink Google account'
+    });
+  }
+});
+
+// Check if user can sign in with Google
+router.post('/check-google', async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email is required'
+      });
+    }
+
+    const { data: user } = await supabase
+      .from('profiles')
+      .select('google_id, auth_provider')
+      .eq('email', email)
+      .single();
+
+    res.json({
+      success: true,
+      hasGoogleAuth: !!user?.google_id,
+      authProvider: user?.auth_provider || null
+    });
+  } catch (error) {
+    res.json({
+      success: true,
+      hasGoogleAuth: false,
+      authProvider: null
     });
   }
 });
