@@ -273,15 +273,15 @@ router.post('/verify-reset-otp', async (req, res) => {
 
 
 
-// Reset password with OTP
+// Reset password without OTP verification
 router.post('/reset-password', async (req, res) => {
   try {
-    const { email, otp, newPassword } = req.body;
+    const { email, newPassword } = req.body;
 
-    if (!email || !otp || !newPassword) {
+    if (!email || !newPassword) {
       return res.status(400).json({
         success: false,
-        message: 'Email, OTP, and new password are required'
+        message: 'Email and new password are required'
       });
     }
 
@@ -293,17 +293,8 @@ router.post('/reset-password', async (req, res) => {
     }
 
     const sanitizedEmail = ValidationUtils.sanitizeEmail(email);
-    const verification = await OTPService.verifyOTP(sanitizedEmail, otp, 'password_reset');
-
-    if (!verification.valid) {
-      return res.status(401).json({
-        success: false,
-        message: verification.message
-      });
-    }
-
     const updatedUser = await UserService.updatePasswordByEmail(sanitizedEmail, newPassword);
-    
+
     if (!updatedUser) {
       return res.status(404).json({
         success: false,
@@ -337,6 +328,8 @@ router.post('/reset-password', async (req, res) => {
     });
   }
 });
+
+
 
 // Clean up expired OTPs
 router.post('/cleanup-otps', async (req, res) => {
