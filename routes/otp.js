@@ -265,23 +265,35 @@ router.post('/verify-reset-otp', async (req, res) => {
 
 
 
-
-// Reset password without OTP verification
 router.post('/reset-password', async (req, res) => {
   try {
-    const { email, newPassword } = req.body;
+    const { email, newPassword, resetToken } = req.body;
 
-    if (!email || !newPassword) {
+    if (!email || !newPassword || !resetToken) {
       return res.status(400).json({
         success: false,
-        message: 'Email and new password are required'
+        message: 'Email, new password and reset token are required'
       });
     }
 
-    if (!ValidationUtils.validatePassword(newPassword)) {
-      return res.status(400).json({
+    const decoded = JWTUtils.verifyToken(resetToken);
+    if (!decoded || decoded.purpose !== 'password_reset' || decoded.email !== email) {
+      return res.status(401).json({
         success: false,
-        message: 'Password must be at least 6 characters long'
+        message: 'Invalid or expired reset token'
+      });
+    }
+
+    const verification = await OTPService.verifyOTP(
+      email,
+      decoded.otp,
+      'password_reset'
+    );
+
+    if (!verification.valid) {
+      return res.status(401).json({
+        success: false,
+        message: verification.message || 'OTP verification failed'
       });
     }
 
@@ -295,22 +307,15 @@ router.post('/reset-password', async (req, res) => {
       });
     }
 
-    const token = JWTUtils.generateToken({
+    const authToken = JWTUtils.generateToken({
       userId: updatedUser.id,
       email: updatedUser.email
     });
 
-    await UserService.updateLastLogin(updatedUser.id);
-
     res.status(200).json({
       success: true,
       message: 'Password reset successful',
-      user: {
-        id: updatedUser.id,
-        email: updatedUser.email,
-        full_name: updatedUser.full_name
-      },
-      token
+      token: authToken
     });
 
   } catch (error) {
