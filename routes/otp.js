@@ -208,28 +208,18 @@ router.post('/request-password-reset', async (req, res) => {
 
 // Add this new endpoint to your existing router
 
-// Verify password reset OTP (without consuming it)
 router.post('/verify-reset-otp', async (req, res) => {
   try {
-    const { email, otp, purpose } = req.body;
+    const { email, otp } = req.body;
+    const purpose = 'password_reset';
 
-    // Validate required fields
-    if (!email || !otp || !purpose) {
+    if (!email || !otp) {
       return res.status(400).json({
         success: false,
-        message: 'Email, OTP, and purpose are required'
+        message: 'Email and OTP are required'
       });
     }
 
-    // Validate purpose
-    if (purpose !== 'password_reset') {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid purpose specified'
-      });
-    }
-
-    // Sanitize and validate email
     const sanitizedEmail = ValidationUtils.sanitizeEmail(email);
     if (!ValidationUtils.validateEmail(sanitizedEmail)) {
       return res.status(400).json({
@@ -238,7 +228,6 @@ router.post('/verify-reset-otp', async (req, res) => {
       });
     }
 
-    // Verify OTP without consuming it
     const verification = await OTPService.verifyOTPWithoutConsuming(
       sanitizedEmail, 
       otp, 
@@ -249,16 +238,20 @@ router.post('/verify-reset-otp', async (req, res) => {
       return res.status(401).json({
         success: false,
         message: verification.message || 'Invalid OTP',
-        // Security consideration: Don't reveal if email exists in system
       });
     }
 
-    // OTP is valid but not consumed yet
+    const resetToken = JWTUtils.generateToken({
+      email: sanitizedEmail,
+      otp: otp,
+      purpose: 'password_reset',
+      expiresIn: '15m'
+    });
+
     res.status(200).json({
       success: true,
       message: 'OTP verification successful',
-      // Include any additional data needed for the next step
-      token: verification.token // Optional: if you need a JWT for subsequent steps
+      resetToken
     });
 
   } catch (error) {
