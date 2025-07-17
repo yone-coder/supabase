@@ -202,6 +202,49 @@ router.post('/request-password-reset', async (req, res) => {
   }
 });
 
+
+
+// Add this new endpoint to your existing router
+
+// Verify password reset OTP (without resetting password)
+router.post('/verify-reset-otp', async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+
+    if (!email || !otp) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email and OTP are required'
+      });
+    }
+
+    const sanitizedEmail = ValidationUtils.sanitizeEmail(email);
+    const verification = await OTPService.verifyOTP(sanitizedEmail, otp, 'password_reset');
+
+    if (!verification.valid) {
+      return res.status(401).json({
+        success: false,
+        message: verification.message
+      });
+    }
+
+    // OTP is valid, but don't consume it yet - it will be consumed during password reset
+    res.status(200).json({
+      success: true,
+      message: 'OTP verification successful'
+    });
+
+  } catch (error) {
+    console.error('Reset OTP verification error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error'
+    });
+  }
+});
+
+
+
 // Reset password with OTP
 router.post('/reset-password', async (req, res) => {
   try {
