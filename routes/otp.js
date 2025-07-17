@@ -204,34 +204,61 @@ router.post('/request-password-reset', async (req, res) => {
 
 
 
+
+
 // Add this new endpoint to your existing router
 
-// Verify password reset OTP (without resetting password)
+// Verify password reset OTP (without consuming it)
 router.post('/verify-reset-otp', async (req, res) => {
   try {
-    const { email, otp } = req.body;
+    const { email, otp, purpose } = req.body;
 
-    if (!email || !otp) {
+    // Validate required fields
+    if (!email || !otp || !purpose) {
       return res.status(400).json({
         success: false,
-        message: 'Email and OTP are required'
+        message: 'Email, OTP, and purpose are required'
       });
     }
 
+    // Validate purpose
+    if (purpose !== 'password_reset') {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid purpose specified'
+      });
+    }
+
+    // Sanitize and validate email
     const sanitizedEmail = ValidationUtils.sanitizeEmail(email);
-    const verification = await OTPService.verifyOTP(sanitizedEmail, otp, 'password_reset');
+    if (!ValidationUtils.validateEmail(sanitizedEmail)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid email format'
+      });
+    }
+
+    // Verify OTP without consuming it
+    const verification = await OTPService.verifyOTPWithoutConsuming(
+      sanitizedEmail, 
+      otp, 
+      purpose
+    );
 
     if (!verification.valid) {
       return res.status(401).json({
         success: false,
-        message: verification.message
+        message: verification.message || 'Invalid OTP',
+        // Security consideration: Don't reveal if email exists in system
       });
     }
 
-    // OTP is valid, but don't consume it yet - it will be consumed during password reset
+    // OTP is valid but not consumed yet
     res.status(200).json({
       success: true,
-      message: 'OTP verification successful'
+      message: 'OTP verification successful',
+      // Include any additional data needed for the next step
+      token: verification.token // Optional: if you need a JWT for subsequent steps
     });
 
   } catch (error) {
@@ -242,6 +269,7 @@ router.post('/verify-reset-otp', async (req, res) => {
     });
   }
 });
+
 
 
 
